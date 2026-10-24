@@ -114,6 +114,7 @@ string GetFNameFromID(uint32 index) {
 #else
                         TNameEntryArray = encGName ^ 0x78787878;
 #endif
+                        TNameEntryArray += Offsets::GNamesAdjustment;
                     } else {
                         return "None";
                     }
@@ -125,7 +126,7 @@ string GetFNameFromID(uint32 index) {
                         auto shift = Read<uint32>(blockSlice);
                         uint32 offset = (Offsets::PointerSize * 2) * (((shift - 0x64) / 0x3) - 1);
 
-                        TNameEntryArray = getPtr(block + offset);
+                        TNameEntryArray = getPtr(block + offset) + Offsets::GNamesAdjustment;
                     } else {
                         return "None";
                     }
@@ -138,16 +139,19 @@ string GetFNameFromID(uint32 index) {
                     auto shift = Read<uint32>(blockSlice);
                     uint32 offset = (Offsets::PointerSize * 2) * (((shift - 0x64) / 0x3) - 1);
 
-                    TNameEntryArray = getPtr(block + offset);
+                    TNameEntryArray = getPtr(block + offset) + Offsets::GNamesAdjustment;
                 } else {
                     return "None";
                 }
             }
         } else {
             if (deRefGNames) {
-                TNameEntryArray = getPtr(getRealOffset(Offsets::GNames));
+                kaddr gnamePointer = getPtr(getRealOffset(Offsets::GNames));
+                TNameEntryArray = Offsets::GNamesAdjustment
+                                  ? getPtr(gnamePointer + Offsets::GNamesAdjustment)
+                                  : gnamePointer;
             } else {
-                TNameEntryArray = getRealOffset(Offsets::GNames);
+                TNameEntryArray = getRealOffset(Offsets::GNames) + Offsets::GNamesAdjustment;
             }
         }
 
@@ -157,7 +161,15 @@ gotGName:
         kaddr FNameEntry = getPtr(
                 FNameEntryArr + ((index % 0x4000) * Offsets::PointerSize));
 
-        return ReadStr(FNameEntry + Offsets::FNameEntryToNameString, 64);
+        kaddr nameAddress = FNameEntry + Offsets::FNameEntryToNameString;
+        if (Read<uint32>(FNameEntry) & 1) {
+            int length = 0;
+            while (length < 64 && Read<UTF16>(nameAddress + (length * sizeof(UTF16))) != 0) {
+                ++length;
+            }
+            return WideStr::getString(nameAddress, length);
+        }
+        return ReadStr(nameAddress, 64);
     }
 }
 

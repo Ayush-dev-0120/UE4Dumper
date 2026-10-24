@@ -128,10 +128,29 @@ Unreal Engine 4 Dumper for Android Devices, Dump Lib libUE4.so from Memory of Ga
     --verbose(Optional)                 Show Verbose Output of Dumping
     --derefgname(Optional) <true/false> De-Reference GNames Address(Default: true)
     --derefguobj(Optional) <true/false> De-Reference GUObject Address(Default: false)
+    --gname-adjust <offset>            Extra offset from the first GNames pointer
     --package <packageName>             Package Name of App(Default: com.tencent.ig)
     --output <outputPath>               File Output path
     --help                              Display this information
 	```
+
+- `--sdku` and `--sdkw` write the readable `SDK.txt` report and a package-organized export under `SDK/`: `SDK.hpp`, `Basic.hpp`, and per-package `_structs.hpp`, `_classes.hpp`, `_parameters.hpp`, and `_functions.cpp` files.
+- Generated type and parameter headers preserve reflected offsets and sizes as byte-array layouts. Function signatures and addresses are recorded in `_functions.cpp` comments and `SDK.txt`; this exporter does not generate `ProcessEvent` wrapper bodies.
+
+### Example: Dump SDK from a connected Android device
+
+Create the output directory on the device, then run the dumper as root:
+
+```cmd
+adb shell su -c "mkdir -p /data/local/tmp/sdk"
+adb shell su -c "/data/local/tmp/ue4dumper64 --sdku --gname 0xe833d20 --gname-adjust 0x110 --guobj 0xEB04D00 --package com.pubg.imobile --output /data/local/tmp/sdk"
+```
+
+Pull the generated files to the current PC directory with:
+
+```cmd
+adb pull /data/local/tmp/sdk sdk
+```
 	
 ## How to Build
 - Clone this repo

@@ -17,6 +17,10 @@
 #include <fstream>
 #include <getopt.h>
 #include <codecvt>
+#include <map>
+#include <sstream>
+#include <sys/stat.h>
+#include <cctype>
 
 #include "Log.h"
 #include "Process.h"

@@ -115,15 +115,19 @@ kaddr getRealOffset(kaddr offset) {
 
 template<typename T>
 T Read(kaddr address) {
-    T data;
-    vm_readv(reinterpret_cast<void *>(address), reinterpret_cast<void *>(&data), sizeof(T));
+    T data{};
+    if (!vm_readv(reinterpret_cast<void *>(address), reinterpret_cast<void *>(&data), sizeof(T))) {
+        return T{};
+    }
     return data;
 }
 
 template<typename T>
 T Read(kaddr address, T def) {
     T data = def;
-    vm_readv(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&data), sizeof(T));
+    if (!vm_readv(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&data), sizeof(T))) {
+        return def;
+    }
     return data;
 }
 
@@ -134,7 +138,7 @@ void Write(kaddr address, T data) {
 
 template<typename T>
 T *ReadArr(kaddr address, unsigned int size) {
-    T *ptr = new T[size];
+    T *ptr = new T[size]{};
     vm_readv(reinterpret_cast<void *>(address), reinterpret_cast<void *>(ptr), (sizeof(T) * size));
     return ptr;
 }

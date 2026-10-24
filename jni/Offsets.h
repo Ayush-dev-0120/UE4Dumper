@@ -7,6 +7,7 @@ namespace Offsets {
     //Global
     kaddr GWorld;
     kaddr GNames;
+    kaddr GNamesAdjustment;
     kaddr GUObjectArray;
     kaddr PointerSize;
     kaddr FUObjectItemPadd;

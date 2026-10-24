@@ -25,6 +25,7 @@ const struct option long_options[] = {
         {"gname",      required_argument, nullptr, 'g'},
         {"guobj",      required_argument, nullptr, 'u'},
         {"gworld",     required_argument, nullptr, 'w'},
+        {"gname-adjust", required_argument, nullptr, 'x'},
         {nullptr, 0,                      nullptr, 0}
 };
 
@@ -36,12 +37,14 @@ void Usage() {
     printf(" Options:\n");
     printf("--SDK Dump With GObjectArray Args--------------------------------------------------------\n");
     printf("  --sdku                              Dump SDK with GUObject\n");
+    printf("                                      Also writes SDK.hpp and package headers under SDK/\n");
     printf("  --gname <address>                   GNames Pointer Address\n");
     printf("  --guobj <address>                   GUObject Pointer Address\n");
     printf("--SDK Dump With GWorld Args--------------------------------------------------------------\n");
     printf("  --sdkw                              Dump SDK with GWorld\n");
     printf("  --gname <address>                   GNames Pointer Address\n");
     printf("  --gworld <address>                  GWorld Pointer Address\n");
+    printf("  --gname-adjust <offset>              Extra offset from the first GNames pointer\n");
     printf("--Dump Strings Args----------------------------------------------------------------------\n");
     printf("  --strings                           Dump Strings\n");
     printf("  --gname <address>                   GNames Pointer Address\n");
@@ -114,6 +117,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'w':
                 Offsets::GWorld = getHexAddr(optarg);
+                break;
+            case 'x':
+                Offsets::GNamesAdjustment = getHexAddr(optarg);
                 break;
             case 'n':
                 isObjsDump = true;

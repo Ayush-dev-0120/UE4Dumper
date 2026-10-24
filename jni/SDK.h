@@ -151,16 +151,220 @@ string resolveProp423(list<kaddr> &recurrce, kaddr prop) {
 
 uint32 classCount = 0;
 
-vector<uint32> structIDMap;
+vector<kaddr> structAddressMap;
+struct SDKPackageOutput {
+    string classes;
+    string structs;
+    string parameters;
+    string functions;
+};
+map<string, SDKPackageOutput> sdkPackageOutputs;
 
-bool isScanned(uint32 id) {
-    for (unsigned int i : structIDMap) {
-        if (i == id) { return true; }
+string sdkIdentifier(const string &value) {
+    string result;
+    result.reserve(value.size());
+    for (unsigned char ch : value) {
+        result.push_back(isalnum(ch) || ch == '_' ? static_cast<char>(ch) : '_');
+    }
+    if (result.empty() || isdigit(static_cast<unsigned char>(result[0]))) {
+        result.insert(result.begin(), '_');
+    }
+    return result;
+}
+
+string sdkPackageIdentifier(const string &packageName) {
+    size_t slash = packageName.find_last_of('/');
+    string leaf = slash == string::npos ? packageName : packageName.substr(slash + 1);
+    string slug = sdkIdentifier(leaf);
+    if (slug.size() > 48) slug.resize(48);
+    uint32 hash = 2166136261u;
+    for (unsigned char ch : packageName) {
+        hash = (hash ^ ch) * 16777619u;
+    }
+    ostringstream suffix;
+    suffix << hex << setw(8) << setfill('0') << hash;
+    return slug + "_" + suffix.str();
+}
+
+uint64 sdkHexValue(const string &line, const string &label) {
+    size_t position = line.find(label);
+    if (position == string::npos) return 0;
+    position += label.size();
+    if (line.compare(position, 2, "0x") == 0) position += 2;
+    return strtoull(line.c_str() + position, nullptr, 16);
+}
+
+void addStructuredSDKClass(kaddr clazz, const string &classDump) {
+    string packageName = "UnknownPackage";
+    kaddr outer = UObject::getOuter(clazz);
+    while (UObject::isValid(outer)) {
+        packageName = UObject::getName(outer);
+        outer = UObject::getOuter(outer);
+    }
+
+    string className = UObject::getName(clazz);
+    if (className.empty()) return;
+    string packageId = sdkPackageIdentifier(packageName);
+    string classId = sdkIdentifier(className);
+    SDKPackageOutput &package = sdkPackageOutputs[packageId];
+    string reflectedType = UObject::getClassName(clazz);
+    string &contents = isEqual(reflectedType, "ScriptStruct") || isEqual(reflectedType, "Enum")
+                       ? package.structs : package.classes;
+    contents += "// Class: " + packageName + "." + className + "\n";
+    contents += "class " + classId + " {\npublic:\n";
+
+    struct LayoutField { uint64 offset; uint64 size; string name; string description; };
+    vector<LayoutField> fields;
+    istringstream input(classDump);
+    string line;
+    while (getline(input, line)) {
+        if (line.find("[Offset: 0x") == string::npos || line.find("Size: 0x") == string::npos)
+            continue;
+        uint64 offset = sdkHexValue(line, "[Offset: ");
+        uint64 size = sdkHexValue(line, "Size: ");
+        if (size == 0 || size > 0x1000000) continue;
+        size_t semicolon = line.find(';');
+        if (semicolon == string::npos) continue;
+        string declaration = line.substr(0, semicolon);
+        size_t end = declaration.find_last_not_of(" \t\r\n");
+        if (end == string::npos) continue;
+        size_t begin = declaration.find_last_of(" \t", end);
+        string memberName = declaration.substr(begin == string::npos ? 0 : begin + 1,
+                                               end - (begin == string::npos ? 0 : begin + 1) + 1);
+        fields.push_back({offset, size, sdkIdentifier(memberName), line});
+    }
+
+    sort(fields.begin(), fields.end(), [](const LayoutField &left, const LayoutField &right) {
+        return left.offset < right.offset;
+    });
+    uint64 cursor = 0;
+    unsigned int paddingIndex = 0;
+    for (const LayoutField &field : fields) {
+        if (field.offset < cursor) {
+            contents += "    // Overlapping field retained in SDK.txt: " + field.description + "\n";
+            continue;
+        }
+        if (field.offset > cursor) {
+            contents += "    uint8_t _pad_" + to_string(paddingIndex++) + "[0x";
+            ostringstream number; number << hex << (field.offset - cursor);
+            contents += number.str() + "];\n";
+        }
+        contents += "    uint8_t " + field.name + "[0x";
+        ostringstream number; number << hex << field.size;
+        contents += number.str() + "]; // " + field.description + "\n";
+        cursor = field.offset + field.size;
+    }
+    for (istringstream functions(classDump); getline(functions, line);) {
+        if (line.find("// 0x") != string::npos) contents += "    // " + line + "\n";
+    }
+    contents += "};\n\n";
+
+    package.functions += "// " + packageName + "." + className + "\n";
+    for (istringstream functions(classDump); getline(functions, line);) {
+        if (line.find("// 0x") != string::npos) package.functions += "// " + line + "\n";
+    }
+
+    kaddr function = UStruct::getChildren(clazz);
+    while (function) {
+        string functionType = UObject::getClassName(function);
+        if (isStartWith(functionType, "Function") || isEqual(functionType, "DelegateFunction")) {
+            string functionName = UObject::getName(function);
+            string paramsName = classId + "_" + sdkIdentifier(functionName) + "_" +
+                                to_string(UObject::getIndex(function)) + "_Params";
+            vector<LayoutField> params;
+            kaddr param = isUE423 ? UStruct::getChildProperties(function) : UStruct::getChildren(function);
+            while (param) {
+                uint64 flags = UProperty::getPropertyFlags(param);
+                if ((flags & 0x80) != 0) {
+                    string paramName = isUE423 ? FField::getName(param) : UObject::getName(param);
+                    int32 paramOffset = UProperty::getOffset(param);
+                    int32 paramSize = UProperty::getElementSize(param);
+                    if (paramOffset < 0 || paramSize <= 0 || paramSize > 0x1000000) {
+                        param = isUE423 ? FField::getNext(param) : UField::getNext(param);
+                        continue;
+                    }
+                    list<kaddr> dependencies;
+                    ostringstream description;
+                    description << (isUE423 ? resolveProp423(dependencies, param)
+                                             : resolveProp(dependencies, param))
+                                << " " << paramName << " [Offset: 0x" << hex
+                                << paramOffset << ", Size: 0x"
+                                << paramSize << "]";
+                    params.push_back({static_cast<uint64>(paramOffset),
+                                      static_cast<uint64>(paramSize),
+                                      sdkIdentifier(paramName), description.str()});
+                }
+                param = isUE423 ? FField::getNext(param) : UField::getNext(param);
+            }
+            sort(params.begin(), params.end(), [](const LayoutField &left, const LayoutField &right) {
+                return left.offset < right.offset;
+            });
+            package.parameters += "// Function " + packageName + "." + className + "." + functionName + "\n";
+            package.parameters += "struct " + paramsName + " {\n";
+            uint64 cursor = 0;
+            unsigned int pad = 0;
+            for (const LayoutField &field : params) {
+                if (field.offset < cursor) {
+                    package.parameters += "    // Overlapping parameter: " + field.description + "\n";
+                    continue;
+                }
+                if (field.offset > cursor) {
+                    ostringstream count; count << hex << (field.offset - cursor);
+                    package.parameters += "    uint8_t _pad_" + to_string(pad++) + "[0x" + count.str() + "];\n";
+                }
+                ostringstream count; count << hex << field.size;
+                package.parameters += "    uint8_t " + field.name + "[0x" + count.str() +"]; // "
+                                      + field.description + "\n";
+                cursor = field.offset + field.size;
+            }
+            package.parameters += "};\n\n";
+        }
+        function = UField::getNext(function);
+    }
+}
+
+void writeStructuredSDK(const string &out) {
+    if (sdkPackageOutputs.empty()) return;
+    string directory = out + "/SDK";
+    mkdir(directory.c_str(), 0777);
+    ofstream index(out + "/SDK.hpp", ofstream::out | ofstream::trunc);
+    if (!index.is_open()) {
+        cout << "Can't write SDK.hpp" << endl;
+        return;
+    }
+    ofstream basic(directory + "/Basic.hpp", ofstream::out | ofstream::trunc);
+    basic << "#pragma once\n#include <cstdint>\n\nnamespace SDK {}\n";
+    index << "#pragma once\n#include \"SDK/Basic.hpp\"\n\n";
+    const char *categories[] = {"structs", "classes", "parameters"};
+    for (const auto &entry : sdkPackageOutputs) {
+        const string *contents[] = {&entry.second.structs, &entry.second.classes,
+                                    &entry.second.parameters};
+        for (size_t category = 0; category < 3; ++category) {
+            string filename = entry.first + "_" + categories[category] + ".hpp";
+            ofstream header(directory + "/" + filename, ofstream::out | ofstream::trunc);
+            if (!header.is_open()) continue;
+            header << "#pragma once\n#include \"Basic.hpp\"\n#pragma pack(push, 1)\n\n"
+                   << "namespace SDK { namespace " << entry.first << " {\n\n"
+                   << *contents[category] << "} }\n#pragma pack(pop)\n";
+            index << "#include \"SDK/" << filename << "\"\n";
+        }
+        ofstream functions(directory + "/" + entry.first + "_functions.cpp",
+                           ofstream::out | ofstream::trunc);
+        if (functions.is_open()) {
+            functions << "#include \"../SDK.hpp\"\n\n" << entry.second.functions;
+        }
+    }
+    index << "\n";
+}
+
+bool isScanned(kaddr address) {
+    for (kaddr scanned : structAddressMap) {
+        if (scanned == address) { return true; }
     }
     return false;
 }
 
-list<kaddr> writeStructChild(ofstream &sdk, kaddr childprop) {
+list<kaddr> writeStructChild(ostream &sdk, kaddr childprop) {
     list<kaddr> recurrce;
     kaddr child = childprop;
     while (child) {
@@ -356,7 +560,7 @@ list<kaddr> writeStructChild(ofstream &sdk, kaddr childprop) {
     return recurrce;
 }
 
-list<kaddr> writeStructChild423(ofstream &sdk, kaddr childprop) {
+list<kaddr> writeStructChild423(ostream &sdk, kaddr childprop) {
     list<kaddr> recurrce;
     kaddr child = childprop;
     while (child) {
@@ -497,7 +701,7 @@ list<kaddr> writeStructChild423(ofstream &sdk, kaddr childprop) {
     return recurrce;
 }
 
-list<kaddr> writeStructChild423_Func(ofstream &sdk, kaddr childprop) {
+list<kaddr> writeStructChild423_Func(ostream &sdk, kaddr childprop) {
     list<kaddr> recurrce;
     kaddr child = childprop;
     while (child) {
@@ -596,7 +800,7 @@ void writeStruct(ofstream &sdk, kaddr clazz) {
         }
 
         uint32 NameID = UObject::getNameID(currStruct);
-        if (!isScanned(NameID)) {
+        if (!isScanned(currStruct)) {
             //Verbose Output
             if (isVerbose) {
                 cout << "Obj: 0x" << std::hex << currStruct << std::dec << endl;
@@ -607,15 +811,18 @@ void writeStruct(ofstream &sdk, kaddr clazz) {
             }
 
             //Dumping
-            structIDMap.push_back(NameID);
-            sdk << "Class: " << UStruct::getStructClassPath(currStruct) << endl;
+            structAddressMap.push_back(currStruct);
+            ostringstream classDump;
+            classDump << "Class: " << UStruct::getStructClassPath(currStruct) << endl;
             if (isUE423) {
-                recurrce.merge(writeStructChild423(sdk, UStruct::getChildProperties(currStruct)));
-                recurrce.merge(writeStructChild423_Func(sdk, UStruct::getChildren(currStruct)));
+                recurrce.merge(writeStructChild423(classDump, UStruct::getChildProperties(currStruct)));
+                recurrce.merge(writeStructChild423_Func(classDump, UStruct::getChildren(currStruct)));
             } else {
-                recurrce.merge(writeStructChild(sdk, UStruct::getChildren(currStruct)));
+                recurrce.merge(writeStructChild(classDump, UStruct::getChildren(currStruct)));
             }
-            sdk << "\n--------------------------------" << endl;
+            classDump << "\n--------------------------------" << endl;
+            sdk << classDump.str();
+            addStructuredSDKClass(currStruct, classDump.str());
             classCount++;
         }
 
@@ -627,6 +834,9 @@ void writeStruct(ofstream &sdk, kaddr clazz) {
 }
 
 void DumpSDK(const string& out) {
+    classCount = 0;
+    structAddressMap.clear();
+    sdkPackageOutputs.clear();
     ofstream sdk(out + "/SDK.txt", ofstream::out);
     if (sdk.is_open()) {
         cout << "Dumping SDK List" << endl;
@@ -644,10 +854,16 @@ void DumpSDK(const string& out) {
         for (int32 i = 0; i < oCount; i++) {
             kaddr uobj = GetUObjectFromID(i);
             if (UObject::isValid(uobj)) {
+                string objectType = UObject::getClassName(uobj);
+                if (isEqual(objectType, "Class") || isEqual(objectType, "ScriptStruct") ||
+                    isEqual(objectType, "Enum")) {
+                    writeStruct(sdk, uobj);
+                }
                 writeStruct(sdk, UObject::getClass(uobj));
             }
         }
         sdk.close();
+        writeStructuredSDK(out);
         clock_t end = clock();
         double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
         cout << setbase(10) << classCount << " Items Dumped in SDK in " << elapsed_secs << "S" << endl;
@@ -657,6 +873,9 @@ void DumpSDK(const string& out) {
 void TestDump(kaddr uobj);
 
 void DumpSDKW(const string& out) {
+    classCount = 0;
+    structAddressMap.clear();
+    sdkPackageOutputs.clear();
     ofstream sdk(out + "/SDK.txt", ofstream::out);
     if (sdk.is_open()) {
         cout << "Dumping SDK List" << endl;
@@ -679,6 +898,7 @@ void DumpSDKW(const string& out) {
             }
         }
         sdk.close();
+        writeStructuredSDK(out);
         clock_t end = clock();
         double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
         cout << classCount << " Items Dumped in SDK in " << elapsed_secs << "S" << endl;
