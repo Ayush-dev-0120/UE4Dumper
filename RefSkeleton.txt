@@ -1,0 +1,2 @@
+# USkeletalMesh RefSkeleton bone indices
+# Mesh | RefSkeleton offset | index | bone name | parent index

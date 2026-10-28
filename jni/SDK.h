@@ -151,6 +151,84 @@ string resolveProp423(list<kaddr> &recurrce, kaddr prop) {
 
 uint32 classCount = 0;
 
+string GetGNameFromID(kaddr gname, int32 nameId);
+string GetActorNameFromGName(kaddr gname, kaddr actor);
+
+// Export the RefSkeleton bone table from every loaded USkeletalMesh asset.
+// FReferenceSkeleton starts with RawRefBoneInfo (a TArray<FMeshBoneInfo>).
+void DumpRefSkeletons(const string &out) {
+    ofstream bones(out + "/RefSkeleton.txt", ofstream::out | ofstream::trunc);
+    if (!bones.is_open()) {
+        cout << "Can't open RefSkeleton.txt" << endl;
+        return;
+    }
+
+    bones << "# USkeletalMesh RefSkeleton bone indices\n";
+    bones << "# Mesh | RefSkeleton offset | index | bone name | parent index\n";
+    int meshCount = 0;
+    int boneCount = 0;
+    const kaddr pointerSize = Offsets::PointerSize;
+
+    int32 objectCount = GetObjectCount();
+    if (objectCount < 1 || objectCount > 999999) {
+        bones << "# ERROR: invalid GUObjectArray count (" << objectCount
+              << "). Check --guobj, --newue, and the game-specific offsets.\n";
+        cout << "RefSkeleton dump skipped: invalid GUObjectArray count (" << objectCount << ")" << endl;
+        return;
+    }
+    for (int32 i = 0; i < objectCount; ++i) {
+        kaddr mesh = GetUObjectFromID(i);
+        if (!UObject::isValid(mesh) || !isEqual(UObject::getClassName(mesh), "SkeletalMesh")) continue;
+
+        kaddr meshClass = UObject::getClass(mesh);
+        int32 refSkeletonOffset = -1;
+        for (kaddr currentClass = meshClass; UObject::isValid(currentClass) && refSkeletonOffset < 0;
+             currentClass = UStruct::getSuperClass(currentClass)) {
+            kaddr property = isUE423 ? UStruct::getChildProperties(currentClass)
+                                     : UStruct::getChildren(currentClass);
+            while (property) {
+                string propertyName = isUE423 ? FField::getName(property) : UObject::getName(property);
+                if (isEqual(propertyName, "RefSkeleton")) {
+                    refSkeletonOffset = UProperty::getOffset(property);
+                    break;
+                }
+                property = isUE423 ? FField::getNext(property) : UField::getNext(property);
+            }
+        }
+
+        string meshName = UObject::getName(mesh);
+        if (refSkeletonOffset < 0 || pointerSize == 0) {
+            bones << meshName << " | RefSkeleton offset unavailable\n";
+            continue;
+        }
+
+        kaddr refSkeleton = mesh + static_cast<kaddr>(refSkeletonOffset);
+        kaddr rawBoneInfo = getPtr(refSkeleton); // FReferenceSkeleton::RawRefBoneInfo
+        int32 count = Read<int32>(refSkeleton + pointerSize);
+        if (!rawBoneInfo || count < 0 || count > 512) {
+            bones << meshName << " | RefSkeleton offset 0x" << hex << refSkeletonOffset << dec
+                  << " | invalid RawRefBoneInfo (count=" << count << ")\n";
+            continue;
+        }
+
+        ++meshCount;
+        for (int32 boneIndex = 0; boneIndex < count; ++boneIndex) {
+            // FMeshBoneInfo: FName (comparison index + number), then ParentIndex.
+            kaddr info = rawBoneInfo + (static_cast<kaddr>(boneIndex) * 0x10);
+            uint32 nameId = Read<uint32>(info);
+            int32 parentIndex = Read<int32>(info + 0x8);
+            bones << meshName << " | RefSkeleton+0x" << hex << refSkeletonOffset << dec
+                  << " | " << boneIndex << " | " << GetFNameFromID(nameId)
+                  << " | " << parentIndex << "\n";
+            ++boneCount;
+        }
+    }
+
+    bones.close();
+    cout << meshCount << " SkeletalMesh assets, " << boneCount
+         << " bones written to RefSkeleton.txt" << endl;
+}
+
 vector<kaddr> structAddressMap;
 struct SDKPackageOutput {
     string classes;
@@ -864,10 +942,277 @@ void DumpSDK(const string& out) {
         }
         sdk.close();
         writeStructuredSDK(out);
+        DumpRefSkeletons(out);
         clock_t end = clock();
         double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
         cout << setbase(10) << classCount << " Items Dumped in SDK in " << elapsed_secs << "S" << endl;
     }
+}
+
+string GetTextFromGNameEntry(kaddr nameEntry) {
+    if (!nameEntry) return "";
+    char buffer[41] = {};
+    char text[42] = {};
+    if (!vm_readv(reinterpret_cast<void *>(nameEntry + 4 + Offsets::PointerSize),
+                  reinterpret_cast<void *>(buffer), sizeof(buffer))) {
+        return "";
+    }
+    int32 i = 0;
+    for (; i < 41; ++i) {
+        if (buffer[i] == '\0') break;
+        text[i] = buffer[i];
+        if (buffer[i] == 67 && i > 10) break;
+    }
+    text[(i + 1 < static_cast<int32>(sizeof(text))) ? i + 1 : static_cast<int32>(sizeof(text)) - 1] = '\0';
+    return string(text);
+}
+
+string GetGNameFromID(kaddr gname, int32 nameId) {
+    if (!gname) return "";
+    if (nameId <= 0) return "";
+    int32 page = nameId / 0x4000;
+    int32 index = nameId % 0x4000;
+    if (page < 0 || page >= 64) return "";
+
+    kaddr chunk = getPtr(gname + (static_cast<kaddr>(page) * Offsets::PointerSize));
+    if (!chunk) return "";
+    kaddr nameEntry = getPtr(chunk + (static_cast<kaddr>(index) * Offsets::PointerSize));
+    if (!nameEntry) return "";
+
+    return GetTextFromGNameEntry(nameEntry);
+}
+
+string GetActorNameFromGName(kaddr gname, kaddr actor) {
+    if (!actor) return "";
+    int32 nameId = Read<int32>(actor + 8 + (2 * Offsets::PointerSize));
+    return GetGNameFromID(gname, nameId);
+}
+
+string ReadFStringUTF16(kaddr address) {
+#if defined(__LP64__)
+    const kaddr minimumUserAddress = 0x100000000ULL;
+    const kaddr maximumUserAddress = 0x800000000000ULL;
+#else
+    const kaddr minimumUserAddress = 0x10000000;
+    const kaddr maximumUserAddress = 0xF0000000;
+#endif
+    if (address < minimumUserAddress || address >= maximumUserAddress) return "";
+    kaddr data = getPtr(address);
+    int32 length = Read<int32>(address + Offsets::PointerSize);
+    if (data < minimumUserAddress || data >= maximumUserAddress || length < 1 || length > 128) return "";
+    if (Read<UTF16>(data + (static_cast<kaddr>(length - 1) * sizeof(UTF16))) == 0) --length;
+    if (length <= 0) return "";
+
+    vector<UTF16> units(static_cast<size_t>(length));
+    if (!vm_readv(reinterpret_cast<void *>(data), units.data(), units.size() * sizeof(UTF16))) return "";
+
+    string result;
+    for (int32 i = 0; i < length; ++i) {
+        uint32 codepoint = units[i];
+        if (codepoint >= 0xD800 && codepoint <= 0xDBFF && i + 1 < length &&
+            units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
+            codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (units[++i] - 0xDC00);
+        }
+        if (codepoint <= 0x7F) {
+            result.push_back(static_cast<char>(codepoint));
+        } else if (codepoint <= 0x7FF) {
+            result.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+            result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        } else if (codepoint <= 0xFFFF) {
+            result.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+            result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        } else {
+            result.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+            result.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+            result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+    }
+    return result;
+}
+
+struct BoneInfoArray {
+    kaddr data = 0;
+    int32 count = 0;
+    int32 objectOffset = -1;
+};
+
+// RefSkeleton is a native USkeletalMesh member on some builds rather than a
+// reflected property. Locate its TArray<FMeshBoneInfo> by validating names and
+// parent indices in the candidate array entries.
+BoneInfoArray FindRawBoneInfoArray(kaddr skeletalMeshAsset, kaddr gname) {
+    BoneInfoArray best;
+    int bestScore = 0;
+#if defined(__LP64__)
+    const kaddr minAddress = 0x100000000ULL;
+    const kaddr maxAddress = 0x800000000000ULL;
+#else
+    const kaddr minAddress = 0x10000000;
+    const kaddr maxAddress = 0xF0000000;
+#endif
+
+    for (int32 offset = Offsets::BoneInfoScanStart; offset < Offsets::BoneInfoScanEnd;
+         offset += Offsets::BoneInfoScanStep) {
+        kaddr array = skeletalMeshAsset + offset;
+        kaddr data = getPtr(array);
+        int32 count = Read<int32>(array + 8);
+        int32 capacity = Read<int32>(array + 12);
+        if (data < minAddress || data >= maxAddress || count < 16 || count > 512 ||
+            capacity < count || capacity > 512) continue;
+
+        int validNames = 0;
+        int validParents = 0;
+        int inspected = count < 16 ? count : 16;
+        for (int32 i = 0; i < inspected; ++i) {
+            kaddr info = data + (static_cast<kaddr>(i) * Offsets::BoneInfoEntrySize);
+            int32 nameId = Read<int32>(info);
+            int32 parentIndex = Read<int32>(info + Offsets::BoneInfoParentIndexOffset);
+            if (parentIndex == -1 || (parentIndex >= 0 && parentIndex < count)) ++validParents;
+            if (nameId > 0 && !GetGNameFromID(gname, nameId).empty()) ++validNames;
+        }
+
+        int score = validNames * 4 + validParents;
+        if (validNames >= 4 && validParents >= inspected - 2 && score > bestScore) {
+            best.data = data;
+            best.count = count;
+            best.objectOffset = offset;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
+// Export runtime component-space bone transform addresses for verified player actors.
+int32 DumpBoneTransformAddresses(kaddr actor, const string &actorName, const string &playerName,
+                                 kaddr gname, ofstream &bones) {
+#if defined(__LP64__)
+    const kaddr minimumUserAddress = 0x100000000ULL;
+    const kaddr maximumUserAddress = 0x800000000000;
+#else
+    const kaddr minimumUserAddress = 0x10000000;
+    const kaddr maximumUserAddress = 0xF0000000;
+#endif
+
+    if (actor < minimumUserAddress) return 0;
+    kaddr mesh = getPtr(actor + Offsets::BoneActorToMesh);
+    if (mesh < minimumUserAddress || mesh >= maximumUserAddress) return 0;
+
+    kaddr masterPose = getPtr(mesh + Offsets::BoneMeshToMasterPose);
+    bool validMasterPose = masterPose >= minimumUserAddress && masterPose < maximumUserAddress;
+    kaddr poseMesh = validMasterPose ? masterPose : mesh;
+    kaddr transformArray = poseMesh + Offsets::BoneMeshToCachedComponentSpaceTransforms;
+    kaddr transforms = getPtr(transformArray);
+    int32 transformCount = Read<int32>(transformArray + Offsets::PointerSize);
+    int32 transformMax = Read<int32>(transformArray + Offsets::PointerSize + sizeof(int32));
+    // Some target components report Num=0 while retaining an allocated,
+    // initialized component-space transform buffer. Use its bounded capacity.
+    if (transformCount == 0 && transformMax > 0 && transformMax <= 512) {
+        transformCount = transformMax;
+    }
+    if (transforms < minimumUserAddress || transforms >= maximumUserAddress ||
+        transformCount < 1 || transformCount > 512) return 0;
+
+    kaddr skeletalMeshAsset = getPtr(poseMesh + Offsets::BoneMeshToSkeletalMesh);
+    kaddr skeleton = skeletalMeshAsset >= minimumUserAddress && skeletalMeshAsset < maximumUserAddress
+                         ? getPtr(skeletalMeshAsset + Offsets::BoneSkeletalMeshToSkeleton)
+                         : 0;
+    kaddr boneTreeArray = skeleton >= minimumUserAddress && skeleton < maximumUserAddress
+                              ? skeleton + Offsets::BoneSkeletonToBoneTree
+                              : 0;
+    kaddr boneTree = boneTreeArray ? getPtr(boneTreeArray) : 0;
+    int32 boneNameCount = boneTreeArray ? Read<int32>(boneTreeArray + Offsets::PointerSize) : 0;
+    if (!boneTree || boneNameCount < 1 || boneNameCount > 512) {
+        boneTree = 0;
+        boneNameCount = 0;
+    }
+
+    BoneInfoArray rawBoneInfo;
+    if (skeletalMeshAsset >= minimumUserAddress && skeletalMeshAsset < maximumUserAddress) {
+        rawBoneInfo = FindRawBoneInfoArray(skeletalMeshAsset, gname);
+    }
+
+    for (int32 boneIndex = 0; boneIndex < transformCount; ++boneIndex) {
+        kaddr transformAddress = transforms +
+                                 (static_cast<kaddr>(boneIndex) * Offsets::BoneFTransformSize);
+        string boneName;
+        if (boneTree && boneIndex < boneNameCount) {
+            kaddr boneNode = boneTree +
+                             (static_cast<kaddr>(boneIndex) * Offsets::BoneTreeEntrySize);
+            boneName = GetGNameFromID(gname, Read<int32>(boneNode));
+        }
+        if (boneName.empty() && rawBoneInfo.data && boneIndex < rawBoneInfo.count) {
+            kaddr info = rawBoneInfo.data +
+                         (static_cast<kaddr>(boneIndex) * Offsets::BoneInfoEntrySize);
+            boneName = GetGNameFromID(gname, Read<int32>(info));
+        }
+        if (boneName.empty()) boneName = "Unknown_" + to_string(boneIndex);
+        bones << actorName << " | " << playerName << " | " << boneIndex << " | " << boneName
+              << " | 0x" << hex << transformAddress << dec << "\n";
+    }
+    return transformCount;
+}
+
+// PUBG actor-array pointer decryption layout supplied for this build.
+struct EncryptedActors {
+    uint64 Enc_1, Enc_2, Enc_3, Enc_4;
+};
+
+struct ActorArrayChunk {
+    uint8 val_1, val_2, val_3, val_4;
+    uint8 val_5, val_6, val_7, val_8;
+};
+
+kaddr DecryptActorsArray(kaddr level, int actorsOffset, int encryptedActorsOffset) {
+    if (level < 0x10000000) return 0;
+
+    if (Read<uint64>(level + actorsOffset) > 0) return level + actorsOffset;
+    if (Read<uint64>(level + encryptedActorsOffset) > 0) return level + encryptedActorsOffset;
+
+    EncryptedActors actors = Read<EncryptedActors>(level + encryptedActorsOffset + 0x10);
+    if (actors.Enc_1 > 0) {
+        ActorArrayChunk enc = Read<ActorArrayChunk>(actors.Enc_1 + 0x80);
+        uint64 low24 = (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_1)) |
+                        (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_2)) << 8) |
+                        (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_3)) << 0x10)) &
+                       0xFFFFFFULL;
+        uint64 low40 = (low24 |
+                        (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_4)) << 0x18) |
+                        (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_5)) << 0x20)) &
+                       0xFFFF00FFFFFFFFFFULL;
+        return low40 |
+               (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_6)) << 0x28) |
+               (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_7)) << 0x30) |
+               (static_cast<uint64>(Read<uint8>(actors.Enc_1 + enc.val_8)) << 0x38);
+    }
+    if (actors.Enc_2 > 0) {
+        uint64 lostActors = Read<uint64>(actors.Enc_2);
+        if (lostActors > 0) {
+            return ((uint16)(lostActors - 0x400) & 0xFF00) |
+                   ((uint8)(lostActors - 0x04)) |
+                   ((lostActors + 0xFC0000) & 0xFF0000) |
+                   ((lostActors - 0x4000000) & 0xFF000000) |
+                   ((lostActors + 0xFC00000000) & 0xFF00000000) |
+                   ((lostActors + 0xFC0000000000) & 0xFF0000000000) |
+                   ((lostActors + 0xFC000000000000) & 0xFF000000000000) |
+                   ((lostActors - 0x400000000000000) & 0xFF00000000000000);
+        }
+    }
+    if (actors.Enc_3 > 0) {
+        uint64 lostActors = Read<uint64>(actors.Enc_3);
+        if (lostActors > 0) return (lostActors >> 0x38) | (lostActors << (64 - 0x38));
+    }
+    if (actors.Enc_4 > 0) {
+        uint64 lostActors = Read<uint64>(actors.Enc_4);
+        if (lostActors > 0) return lostActors ^ 0xCDCD00;
+    }
+    return 0;
+}
+
+kaddr getEntityAddr(kaddr base, kaddr &level) {
+    level = getPtr(getPtr(getPtr(getPtr(base + Offsets::GWorld) + 0x810) + 0x78) + 0x30);
+    cout << "Resolved Level: 0x" << hex << level << dec << endl;
+    return DecryptActorsArray(level, 0xA0, 0x448);
 }
 
 void TestDump(kaddr uobj);
@@ -877,28 +1222,151 @@ void DumpSDKW(const string& out) {
     structAddressMap.clear();
     sdkPackageOutputs.clear();
     ofstream sdk(out + "/SDK.txt", ofstream::out);
+    ofstream boneAddresses(out + "/BoneTransformAddresses.txt", ofstream::out | ofstream::trunc);
+    if (boneAddresses.is_open()) {
+        boneAddresses << "# Actor class | player name | bone index | bone name | runtime FTransform address\n";
+    }
     if (sdk.is_open()) {
         cout << "Dumping SDK List" << endl;
         clock_t begin = clock();
         kaddr gworld = getPtr(UWorld::getGWorld());
         cout << "UWorld: " << setbase(16) << gworld << setbase(10) << " | Name: "
              << UObject::getName(gworld) << endl;
-        if (UObject::isValid(gworld)) {
-            //Iterate World
-            writeStruct(sdk, UObject::getClass(gworld));
-            //Iterate Entities
-            kaddr level = getPtr(gworld + Offsets::UWorldToPersistentLevel);
-            kaddr actorList = getPtr(level + Offsets::ULevelToAActors);
-            int actorsCount = Read<int>(level + Offsets::ULevelToAActorsCount);
-            for (int i = 0; i < actorsCount; i++) {
-                kaddr actor = getPtr(actorList + (i * Offsets::PointerSize));
-                if (UObject::isValid(actor)) {
-                    writeStruct(sdk, UObject::getClass(actor));
+        // A UObject name/class check can fail for a valid world when the
+        // game's UObject offsets differ. Continue from the world pointer and
+        // validate the level/actor array before walking it.
+        if (gworld) {
+            kaddr worldClass = UObject::getClass(gworld);
+            if (UObject::isValid(worldClass)) writeStruct(sdk, worldClass);
+
+            kaddr level = 0;
+            kaddr actorArray = getEntityAddr(libbase, level);
+            kaddr actorList = actorArray ? getPtr(actorArray) : 0;
+            int32 actorsCount = actorArray ? Read<int32>(actorArray + Offsets::PointerSize) : 0;
+            // Match the game's chain: gnameGlobal = *(base + GNames),
+            // then gname = *(gnameGlobal + GNamesAdjustment).
+            kaddr gnameGlobal = getPtr(getRealOffset(Offsets::GNames));
+            kaddr gname = gnameGlobal
+                              ? getPtr(gnameGlobal + Offsets::GNamesAdjustment)
+                              : 0;
+            cout << "PersistentLevel: " << setbase(16) << level
+                 << " | ActorArray: " << actorArray << " | ActorData: " << actorList
+                 << setbase(10) << " | ActorCount: " << actorsCount
+                 << " | GNameGlobal: 0x" << setbase(16) << gnameGlobal
+                 << " | GNameRoot: 0x" << gname << setbase(10) << endl;
+
+            if (level && actorList && actorsCount > 0 && actorsCount <= 100000) {
+                int32 actorPointersFound = 0;
+                int32 namedActors = 0;
+                int32 playerActorsFound = 0;
+                int32 botPlayersFound = 0;
+                int32 realPlayersFound = 0;
+                int32 unknownPlayerType = 0;
+                int32 actorsWithBones = 0;
+                int32 boneTransformsWritten = 0;
+                for (int32 i = 0; i < actorsCount; ++i) {
+                    kaddr actor = getPtr(actorList + (static_cast<kaddr>(i) * Offsets::PointerSize));
+                    if (actor >= 0x10000000) {
+                        ++actorPointersFound;
+                        string actorName = GetActorNameFromGName(gname, actor);
+                        if (!actorName.empty()) ++namedActors;
+                        bool isPlayer = actorName.find("BP_PlayerPawn") != string::npos ||
+                                        actorName.find("BP_PlayerCharacter") != string::npos ||
+                                        actorName.find("BP_CharacterModelTaget") != string::npos;
+                        if (!isPlayer) continue;
+                        ++playerActorsFound;
+                        kaddr playerState = getPtr(actor + Offsets::BoneActorToPlayerState);
+                        string playerStateClass;
+                        if (playerState >= 0x10000000) {
+                            kaddr playerStateClassObject = UObject::getClass(playerState);
+                            playerStateClass = playerStateClassObject
+                                                   ? GetActorNameFromGName(gname, playerStateClassObject)
+                                                   : "";
+                        }
+                        bool validPlayerState = playerState >= 0x10000000 &&
+                                                playerStateClass.find("PlayerState") != string::npos;
+                        bool actorClassSaysAI = actorName.find("PlayerPawn") != string::npos &&
+                                                actorName.find("AI") != string::npos;
+                        kaddr ownerActor = actorName.find("BP_CharacterModelTaget") != string::npos
+                                               ? getPtr(actor + Offsets::ActorToOwner)
+                                               : 0;
+                        kaddr ownerClassObject = ownerActor >= 0x10000000
+                                                     ? UObject::getClass(ownerActor)
+                                                     : 0;
+                        string ownerClassName = ownerClassObject
+                                                    ? GetActorNameFromGName(gname, ownerClassObject)
+                                                    : "";
+                        bool ownerClassSaysAI = ownerClassName.find("PlayerPawn") != string::npos &&
+                                                ownerClassName.find("AI") != string::npos;
+                        bool isBot = false;
+                        bool isRealPlayer = false;
+                        if (actorClassSaysAI || ownerClassSaysAI) {
+                            ++botPlayersFound;
+                            isBot = true;
+                        } else if (validPlayerState) {
+                            uint8 botFlags = Read<uint8>(playerState + Offsets::PlayerStateToIsBot);
+                            if ((botFlags & Offsets::PlayerStateIsBotMask) != 0) {
+                                ++botPlayersFound;
+                                isBot = true;
+                            } else {
+                                ++realPlayersFound;
+                                isRealPlayer = true;
+                            }
+                        } else {
+                            ++unknownPlayerType;
+                        }
+                        cout << "GName player actor: " << actorName
+                             << " | PlayerState class: "
+                             << (playerStateClass.empty() ? "unresolved" : playerStateClass)
+                             << " | Owner class: "
+                             << (ownerClassName.empty() ? "unresolved" : ownerClassName)
+                             << " | Classification: "
+                             << (isBot ? "bot" : (isRealPlayer ? "real" : "unknown"))
+                             << endl;
+                        string playerName = playerState
+                                                ? ReadFStringUTF16(playerState + Offsets::BonePlayerStateToPlayerName)
+                                                : "";
+                        if (playerName.empty()) {
+                            string actorLabel = ReadFStringUTF16(actor + Offsets::BoneActorToDisplayPlayerName);
+                            if (!actorLabel.empty() && actorLabel != "ModelTarget") playerName = actorLabel;
+                        }
+                        if (playerName.empty()) {
+                            int32 objectNumber = Read<int32>(actor + 8 + (2 * Offsets::PointerSize) + 4);
+                            // The actor's +0x960 FString is often the generic "ModelTarget"
+                            // label. Prefer a unique actor identity when PlayerState has no name.
+                            playerName = "PlayerActor_" + to_string(objectNumber > 0 ? objectNumber - 1 : 0);
+                        }
+
+                        kaddr actorClass = UObject::getClass(actor);
+                        if (UObject::isValid(actorClass)) writeStruct(sdk, actorClass);
+                        if (boneAddresses.is_open()) {
+                            int32 written = DumpBoneTransformAddresses(actor, actorName, playerName,
+                                                                       gname, boneAddresses);
+                            if (written > 0) {
+                                ++actorsWithBones;
+                                boneTransformsWritten += written;
+                            }
+                        }
+                    }
                 }
+                cout << "Actor pointers accepted: " << actorPointersFound
+                     << " | Named actors: " << namedActors
+                     << " | Player-name matches: " << playerActorsFound
+                     << " | Bots (PlayerState::bIsABot): " << botPlayersFound
+                     << " | Real players: " << realPlayersFound
+                     << " | Unknown player type: " << unknownPlayerType
+                     << " | Actors with bone transforms: " << actorsWithBones
+                     << " | Bone transforms written: " << boneTransformsWritten << endl;
+            } else {
+                cout << "Actor traversal skipped: invalid level/actor array or count." << endl;
             }
+        } else {
+            cout << "Actor traversal skipped: GWorld pointer resolved to null." << endl;
         }
         sdk.close();
+        if (boneAddresses.is_open()) boneAddresses.close();
         writeStructuredSDK(out);
+        DumpRefSkeletons(out);
         clock_t end = clock();
         double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
         cout << classCount << " Items Dumped in SDK in " << elapsed_secs << "S" << endl;

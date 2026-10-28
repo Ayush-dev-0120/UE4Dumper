@@ -137,6 +137,24 @@ Unreal Engine 4 Dumper for Android Devices, Dump Lib libUE4.so from Memory of Ga
 - `--sdku` and `--sdkw` write the readable `SDK.txt` report and a package-organized export under `SDK/`: `SDK.hpp`, `Basic.hpp`, and per-package `_structs.hpp`, `_classes.hpp`, `_parameters.hpp`, and `_functions.cpp` files.
 - Generated type and parameter headers preserve reflected offsets and sizes as byte-array layouts. Function signatures and addresses are recorded in `_functions.cpp` comments and `SDK.txt`; this exporter does not generate `ProcessEvent` wrapper bodies.
 
+### Extract readable strings from any `.so` file
+
+The dumper's `--strings` option reads Unreal Engine name strings using `GNames`; it does not extract arbitrary strings from another shared library. To list readable ASCII strings from any `.so`, use `llvm-strings.exe` from the Android NDK on Windows. Set `LIB` to the library path and replace `<ndk-version>` with your installed NDK version:
+
+```cmd
+set "LIB=C:\path\to\libOther.so"
+"%LOCALAPPDATA%\Android\Sdk\ndk\<ndk-version>\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strings.exe" -a "%LIB%" > OtherStrings.txt
+```
+
+To extract strings from the library on a connected Android device, first copy it to the computer, then run `llvm-strings.exe` on the pulled file:
+
+```cmd
+adb pull /path/on/device/libOther.so .
+"%LOCALAPPDATA%\Android\Sdk\ndk\<ndk-version>\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strings.exe" -a libOther.so > OtherStrings.txt
+```
+
+Replace `/path/on/device/libOther.so` with the actual device path. This extracts readable strings from the `.so` file; it does not dump a library from a running process's memory.
+
 ### Example: Dump SDK from a connected Android device
 
 Create the output directory on the device, then run the dumper as root:
@@ -151,6 +169,28 @@ Pull the generated files to the current PC directory with:
 ```cmd
 adb pull /data/local/tmp/sdk sdk
 ```
+
+### Run the RefSkeleton dump from Windows CMD
+
+Connect the Android device with USB debugging, open the game, and run this in the repository folder. The script pushes the ARM64 dumper, writes its temporary output under `/data/local/tmp/ue4dumper-output`, then pulls `RefSkeleton.txt` into the repository folder:
+
+```cmd
+powershell -ExecutionPolicy Bypass -File .\tools\Run-RefSkeletonDump.ps1 -GName 0xe833d20 -GUObject 0xeb04d00 -GNameAdjust 0x110 -Package com.pubg.imobile -NewUE
+```
+
+Replace the addresses and package with values for your game. Omit `-NewUE` for versions before UE 4.23. The script expects `libs\arm64-v8a\ue4dumper64` and root access through `su`.
+
+### Find bot/player flag offsets from the SDK dump
+
+After generating `SDK.txt`, run this Windows PowerShell script from the repository folder:
+
+```cmd
+powershell -ExecutionPolicy Bypass -File .\tools\Find-BotPlayerOffset.ps1
+```
+
+It lists boolean fields such as `PlayerState::bIsABot` and `UAECharacter::bIsAI` with their class-relative offsets and byte masks. In the current `SDK.txt`, `PlayerState::bIsABot` is at `0x4DC` with mask `0x04`; test it by reading the byte at `PlayerState + 0x4DC` and checking `(value & 0x04) != 0`. `UAECharacter::bIsAI` at `0xA40` is a secondary candidate. Resolve the actor's `PlayerState` pointer before reading the flag. These values are SDK/build-specific and should be checked against a fresh dump for the target game version.
+
+The finder also prints the SDK relationship offsets: `Actor::Owner` (`0xF0`) and `Pawn::PlayerState` (`0x4D0`). The current SDK dump has no `ModelTarget` class/field, so it cannot provide a direct ModelTarget-to-bot link. Validate any owner/player-state pointer with GName before using its bot flag.
 	
 ## How to Build
 - Clone this repo
@@ -166,3 +206,14 @@ adb pull /data/local/tmp/sdk sdk
 
 ## Technlogy Communication
 > Email: patel.kuldip91@gmail.com
+
+
+
+
+
+powershell -ExecutionPolicy Bypass -File tools\Find-GNames.ps1 -Package com.pubg.imobile
+
+
+
+
+powershell -ExecutionPolicy Bypass -File .\tools\Run-RefSkeletonDump.ps1 -GName 0xe833d20 -GUObject 0xeb04d00 -GWorld 0xEDC6210 -GNameAdjust 0x110 -Package com.pubg.imobile -NewUE

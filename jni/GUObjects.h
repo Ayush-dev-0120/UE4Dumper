@@ -8,7 +8,9 @@ using namespace std;
 
 int32 GetObjectCount() {
     if (isUE423) {
-        return Read<int32>(getRealOffset(Offsets::GUObjectArray) +
+        kaddr FUObjectArray = getRealOffset(Offsets::GUObjectArray);
+        if (deRefGUObjectArray) FUObjectArray = getPtr(FUObjectArray);
+        return Read<int32>(FUObjectArray +
                            Offsets::FUObjectArrayToTUObjectArray +
                            Offsets::TUObjectArrayToNumElements);
     } else {
@@ -26,8 +28,9 @@ int32 GetObjectCount() {
 
 kaddr GetUObjectFromID(uint32 index) {
     if (isUE423) {
-        kaddr TUObjectArray = getPtr(
-                getRealOffset(Offsets::GUObjectArray) + Offsets::FUObjectArrayToTUObjectArray);
+        kaddr FUObjectArray = getRealOffset(Offsets::GUObjectArray);
+        if (deRefGUObjectArray) FUObjectArray = getPtr(FUObjectArray);
+        kaddr TUObjectArray = getPtr(FUObjectArray + Offsets::FUObjectArrayToTUObjectArray);
         kaddr Chunk = getPtr(TUObjectArray + ((index / 0x10000) * Offsets::PointerSize));
 
         return getPtr(Chunk + Offsets::FUObjectItemPadd + ((index % 0x10000) * Offsets::FUObjectItemSize));

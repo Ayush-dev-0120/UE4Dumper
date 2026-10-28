@@ -86,6 +86,36 @@ namespace Offsets {
     kaddr ULevelToAActors;
     kaddr ULevelToAActorsCount;
 
+    // Bone dump offsets for the active PUBG target.
+    // SDK.txt source fields: Character.Pawn.Actor.Object::Mesh (line 2135),
+    // SkinnedMeshComponent::SkeletalMesh/MasterPoseComponent (lines 2357-2358),
+    // SkeletalMesh::Skeleton (line 2485), Skeleton::BoneTree (line 2529),
+    // SkeletalMeshComponent::CachedComponentSpaceTransforms (line 2220).
+    // Active target's values (0xA20/0xA28/0xCE0) differ from some SDK.txt fields.
+    kaddr BoneActorToMesh;
+    kaddr BoneMeshToSkeletalMesh;
+    kaddr BoneMeshToMasterPose;
+    kaddr BoneMeshToCachedComponentSpaceTransforms;
+    kaddr BoneSkeletalMeshToSkeleton;
+    kaddr BoneSkeletonToBoneTree;
+    kaddr BoneFTransformSize;
+    kaddr BoneTreeEntrySize;
+    kaddr BoneInfoEntrySize;
+    kaddr BoneInfoParentIndexOffset;
+    kaddr BoneInfoScanStart;
+    kaddr BoneInfoScanEnd;
+    kaddr BoneInfoScanStep;
+
+    // Player label offsets used in BoneTransformAddresses.txt.
+    // SDK.txt: Pawn::PlayerState (line 2057), PlayerState::PlayerName (line 3889),
+    // UAECharacter::PlayerName (line 20472).
+    kaddr BoneActorToPlayerState;
+    kaddr BonePlayerStateToPlayerName;
+    kaddr BoneActorToDisplayPlayerName;
+    kaddr PlayerStateToIsBot;
+    kaddr PlayerStateIsBotMask;
+    kaddr ActorToOwner;
+
     void initOffsets_32() {
         //Global
         PointerSize = 0x4;
@@ -141,6 +171,27 @@ namespace Offsets {
         //Class: ULevel
         ULevelToAActors = 0x70;
         ULevelToAActorsCount = 0x74;
+
+        // Bone dump target layout (SDK.txt source references are documented above).
+        BoneActorToMesh = 0x510;
+        BoneMeshToSkeletalMesh = 0xA20;
+        BoneMeshToMasterPose = 0xA28;
+        BoneMeshToCachedComponentSpaceTransforms = 0xCE0;
+        BoneSkeletalMeshToSkeleton = 0x48;
+        BoneSkeletonToBoneTree = 0x30;
+        BoneFTransformSize = 0x30;
+        BoneTreeEntrySize = 0x10;
+        BoneInfoEntrySize = 0x10;
+        BoneInfoParentIndexOffset = 0x8;
+        BoneInfoScanStart = 0x40;
+        BoneInfoScanEnd = 0x800;
+        BoneInfoScanStep = 0x8;
+        BoneActorToPlayerState = 0x4D0;
+        BonePlayerStateToPlayerName = 0x4B8;
+        BoneActorToDisplayPlayerName = 0x960;
+        PlayerStateToIsBot = 0x4DC;
+        PlayerStateIsBotMask = 0x04;
+        ActorToOwner = 0xF0;
     }
 
     void patchUE423_32() {
@@ -235,6 +286,27 @@ namespace Offsets {
         //Class: ULevel
         ULevelToAActors = 0x98;
         ULevelToAActorsCount = 0xA0;
+
+        // Bone dump target layout (SDK.txt source references are documented above).
+        BoneActorToMesh = 0x510;
+        BoneMeshToSkeletalMesh = 0xA20;
+        BoneMeshToMasterPose = 0xA28;
+        BoneMeshToCachedComponentSpaceTransforms = 0xCE0;
+        BoneSkeletalMeshToSkeleton = 0x48;
+        BoneSkeletonToBoneTree = 0x30;
+        BoneFTransformSize = 0x30;
+        BoneTreeEntrySize = 0x10;
+        BoneInfoEntrySize = 0x10;
+        BoneInfoParentIndexOffset = 0x8;
+        BoneInfoScanStart = 0x40;
+        BoneInfoScanEnd = 0x800;
+        BoneInfoScanStep = 0x8;
+        BoneActorToPlayerState = 0x4D0;
+        BonePlayerStateToPlayerName = 0x4B8;
+        BoneActorToDisplayPlayerName = 0x960;
+        PlayerStateToIsBot = 0x4DC;
+        PlayerStateIsBotMask = 0x04;
+        ActorToOwner = 0xF0;
     }
 
     void patchUE423_64() {
@@ -248,7 +320,7 @@ namespace Offsets {
         FNameEntryToLenBit = 6;
         FNameEntryToString = 0x2;
         //Class: TUObjectArray
-        TUObjectArrayToNumElements = 0x14;
+        TUObjectArrayToNumElements = 0xC;
         //Class: UStruct
         UStructToChildProperties = 0x44;
         //Class: FField
