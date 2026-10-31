@@ -5,3 +5,11 @@ data/*
 /libs/*
 obj/*
 libs/*
+libs/*
+
+libdump/*
+libs/arm64-v8a/ue4dumper64
+libs/arm64-v8a/ue4dumper64
+BoneTransformAddresses.txt
+ComponentToWorldCandidates.txt
+BoneTransformAddresses.txt

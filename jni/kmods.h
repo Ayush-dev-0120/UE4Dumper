@@ -18,6 +18,7 @@
 #include <getopt.h>
 #include <codecvt>
 #include <map>
+#include <unordered_map>
 #include <sstream>
 #include <sys/stat.h>
 #include <cctype>

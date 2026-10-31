@@ -19,9 +19,6 @@ if ([string]::IsNullOrWhiteSpace($Dumper)) {
 if (-not [IO.Path]::IsPathRooted($Dumper)) {
     $Dumper = Join-Path $repoRoot $Dumper
 }
-if (-not (Test-Path -LiteralPath $Dumper -PathType Leaf)) {
-    throw "Dumper binary not found: $Dumper"
-}
 foreach ($value in @($GName, $GUObject, $GNameAdjust, $GWorld)) {
     if ([string]::IsNullOrWhiteSpace($value)) { continue }
     if ($value -notmatch '^0x[0-9a-fA-F]+$|^[0-9a-fA-F]+$') {
@@ -85,6 +82,7 @@ $remoteBinary = "/data/local/tmp/ue4dumper64"
 $remoteOutput = "/data/local/tmp/ue4dumper-output-$([DateTime]::Now.ToString('yyyyMMdd-HHmmss'))"
 $localOutput = Join-Path $repoRoot "RefSkeleton.txt"
 $localBoneAddresses = Join-Path $repoRoot "BoneTransformAddresses.txt"
+$localComponentCandidates = Join-Path $repoRoot "ComponentToWorldCandidates.txt"
 
 $devices = @(& adb devices 2>&1)
 if ($LASTEXITCODE -ne 0 -or -not ($devices | Where-Object { $_ -match '\sdevice$' })) {
@@ -117,4 +115,7 @@ if (-not [string]::IsNullOrWhiteSpace($GWorld)) {
     & adb pull "$remoteOutput/BoneTransformAddresses.txt" $repoRoot
     if ($LASTEXITCODE -ne 0) { throw "Could not export BoneTransformAddresses.txt to the repository folder." }
     Write-Host "Exported: $localBoneAddresses"
+    & adb pull "$remoteOutput/ComponentToWorldCandidates.txt" $repoRoot
+    if ($LASTEXITCODE -ne 0) { throw "Could not export ComponentToWorldCandidates.txt to the repository folder." }
+    Write-Host "Exported: $localComponentCandidates"
 }

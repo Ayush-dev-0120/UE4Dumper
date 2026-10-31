@@ -1153,6 +1153,84 @@ int32 DumpBoneTransformAddresses(kaddr actor, const string &actorName, const str
     return transformCount;
 }
 
+// ComponentToWorld is not a reflected UProperty in many UE4 builds, so it is
+// absent from SDK.txt. Collect plausible live FTransform layouts from several
+// player mesh objects and report offsets that recur across those objects.
+bool GetComponentToWorldLayoutCandidate(const string &sdkPath, kaddr &candidateOffset,
+                                        kaddr &relativeScaleOffset, kaddr &relativeScaleSize) {
+    ifstream sdk(sdkPath.c_str());
+    if (!sdk.is_open()) return false;
+    bool inSceneComponent = false;
+    string line;
+    while (getline(sdk, line)) {
+        if (line.find("Class: ") == 0) {
+            inSceneComponent = line.find("Class: SceneComponent.") == 0;
+            continue;
+        }
+        if (!inSceneComponent || line.find("RelativeScale3D;") == string::npos) continue;
+        size_t offsetMarker = line.find("Offset: 0x");
+        size_t sizeMarker = line.find(", Size: 0x");
+        if (offsetMarker == string::npos || sizeMarker == string::npos) return false;
+        const char *offsetText = line.c_str() + offsetMarker + 10;
+        const char *sizeText = line.c_str() + sizeMarker + 10;
+        relativeScaleOffset = static_cast<kaddr>(strtoull(offsetText, nullptr, 16));
+        relativeScaleSize = static_cast<kaddr>(strtoull(sizeText, nullptr, 16));
+        candidateOffset = (relativeScaleOffset + relativeScaleSize + 0xF) & ~static_cast<kaddr>(0xF);
+        return relativeScaleSize != 0;
+    }
+    // The current PUBG SDK dump can omit classes when UObject name validation
+    // fails during --sdkw. Keep its reflected SceneComponent anchor as fallback.
+    if (pkg == "com.pubg.imobile") {
+        relativeScaleOffset = 0x1FC; // sdk/SDK.txt: SceneComponent::RelativeScale3D
+        relativeScaleSize = 0x0C;
+        candidateOffset = (relativeScaleOffset + relativeScaleSize + 0xF) & ~static_cast<kaddr>(0xF);
+        return true;
+    }
+    return false;
+}
+
+void CollectComponentToWorldCandidates(kaddr mesh, const string &actorName,
+                                      const char *componentKind, map<kaddr, int> &candidateHits,
+                                      ofstream &details) {
+#if defined(__LP64__)
+    const kaddr minimumUserAddress = 0x100000000ULL;
+    const kaddr maximumUserAddress = 0x800000000000;
+#else
+    const kaddr minimumUserAddress = 0x10000000;
+    const kaddr maximumUserAddress = 0xF0000000;
+#endif
+    if (mesh < minimumUserAddress || mesh >= maximumUserAddress) return;
+
+    struct alignas(16) MeshProbe {
+        uint8 bytes[0x1030];
+    };
+    MeshProbe sample = Read<MeshProbe>(mesh);
+
+    // UE FTransform memory is quaternion, translation, then scale.
+    for (kaddr offset = 0x100; offset <= 0x1000; offset += 4) {
+        if (mesh + offset + 0x30 >= maximumUserAddress) break;
+        const float *values = reinterpret_cast<const float *>(sample.bytes + offset);
+        float quatLength = values[0] * values[0] + values[1] * values[1] +
+                           values[2] * values[2] + values[3] * values[3];
+        bool plausible = isfinite(quatLength) && quatLength > 0.80f && quatLength < 1.20f;
+        for (int i = 4; i <= 10 && plausible; ++i) plausible = isfinite(values[i]);
+        for (int i = 4; i <= 6 && plausible; ++i) {
+            if (fabsf(values[i]) > 10000000.0f) plausible = false;
+        }
+        for (int i = 8; i <= 10 && plausible; ++i) {
+            if (fabsf(values[i]) < 0.01f || fabsf(values[i]) > 100.0f) plausible = false;
+        }
+        if (plausible) {
+            ++candidateHits[offset];
+            details << actorName << " | " << componentKind << " | 0x" << hex << mesh
+                    << " | 0x" << offset << dec
+                    << " | translation " << values[4] << ", " << values[5] << ", " << values[6]
+                    << " | scale " << values[8] << ", " << values[9] << ", " << values[10]
+                    << " | quatNorm2 " << quatLength << "\n";
+        }
+    }
+}
+
 // PUBG actor-array pointer decryption layout supplied for this build.
 struct EncryptedActors {
     uint64 Enc_1, Enc_2, Enc_3, Enc_4;
@@ -1223,6 +1301,18 @@ void DumpSDKW(const string& out) {
     sdkPackageOutputs.clear();
     ofstream sdk(out + "/SDK.txt", ofstream::out);
     ofstream boneAddresses(out + "/BoneTransformAddresses.txt", ofstream::out | ofstream::trunc);
+    ofstream componentCandidates(out + "/ComponentToWorldCandidates.txt", ofstream::out | ofstream::trunc);
+    map<kaddr, int> componentCandidateHits;
+    int componentObjectsScanned = 0;
+    kaddr layoutCandidateOffset = 0;
+    kaddr relativeScaleOffset = 0;
+    kaddr relativeScaleSize = 0;
+    bool layoutCandidateFound = false;
+    if (componentCandidates.is_open()) {
+        componentCandidates << "# Plausible runtime FTransform values from player mesh memory\n"
+                            << "# Candidate values are heuristic; compare translations with known live world positions.\n"
+                            << "# Actor | component kind | component address | candidate offset | translation | scale | quatNorm2\n";
+    }
     if (boneAddresses.is_open()) {
         boneAddresses << "# Actor class | player name | bone index | bone name | runtime FTransform address\n";
     }
@@ -1339,6 +1429,21 @@ void DumpSDKW(const string& out) {
 
                         kaddr actorClass = UObject::getClass(actor);
                         if (UObject::isValid(actorClass)) writeStruct(sdk, actorClass);
+                        kaddr mesh = getPtr(actor + Offsets::BoneActorToMesh);
+                        if (componentObjectsScanned < 128 && mesh) {
+                            CollectComponentToWorldCandidates(mesh, actorName, "Mesh",
+                                                              componentCandidateHits, componentCandidates);
+                            ++componentObjectsScanned;
+                            // Actor::RootComponent is 0x208 in the active SDK dump.
+                            // Comparing root and mesh world positions helps disambiguate
+                            // transform-shaped fields that pass the layout heuristic.
+                            kaddr rootComponent = getPtr(actor + 0x208);
+                            if (rootComponent >= 0x10000000) {
+                                CollectComponentToWorldCandidates(rootComponent, actorName, "Root",
+                                                                  componentCandidateHits, componentCandidates);
+                                ++componentObjectsScanned;
+                            }
+                        }
                         if (boneAddresses.is_open()) {
                             int32 written = DumpBoneTransformAddresses(actor, actorName, playerName,
                                                                        gname, boneAddresses);
@@ -1365,6 +1470,34 @@ void DumpSDKW(const string& out) {
         }
         sdk.close();
         if (boneAddresses.is_open()) boneAddresses.close();
+        layoutCandidateFound = GetComponentToWorldLayoutCandidate(
+            out + "/SDK.txt", layoutCandidateOffset, relativeScaleOffset, relativeScaleSize);
+        if (componentCandidates.is_open()) {
+            componentCandidates << "\n# Repeated offsets summary\n"
+                                << "# Candidate offset | matching components | scanned components\n";
+            for (const auto &candidate : componentCandidateHits) {
+                if (candidate.second >= 2) {
+                    componentCandidates << "0x" << hex << candidate.first << dec << " | "
+                                        << candidate.second << " | " << componentObjectsScanned << "\n";
+                }
+            }
+            if (layoutCandidateFound) {
+                componentCandidates << "# RelativeScale3D ends at 0x" << hex
+                                    << (relativeScaleOffset + relativeScaleSize)
+                                    << "; 16-byte aligned slot: 0x" << layoutCandidateOffset << dec << "\n";
+                auto match = componentCandidateHits.find(layoutCandidateOffset);
+                if (match != componentCandidateHits.end() && match->second >= 4) {
+                    componentCandidates << "RUNTIME-VERIFIED ComponentToWorld offset: 0x"
+                                        << hex << layoutCandidateOffset << dec << " ("
+                                        << match->second << " matching live components)\n";
+                } else {
+                    componentCandidates << "No runtime FTransform match at the layout-derived offset.\n";
+                }
+            } else {
+                componentCandidates << "Could not derive the ComponentToWorld slot from SceneComponent::RelativeScale3D.\n";
+            }
+            componentCandidates.close();
+        }
         writeStructuredSDK(out);
         DumpRefSkeletons(out);
         clock_t end = clock();

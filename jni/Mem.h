@@ -2,6 +2,8 @@
 #define MEMORY_H
 
 #include <dirent.h>
+#include <string>
+#include <vector>
 #include "Process.h"
 
 using namespace std;
@@ -103,6 +105,40 @@ kaddr get_module_end(const char *module_name) {
         fclose(fp);
     }
     return addr;
+}
+
+struct ModuleMemoryRegion {
+    kaddr start;
+    kaddr end;
+    bool readable;
+    bool executable;
+    string name;
+};
+
+vector<ModuleMemoryRegion> get_process_regions(const char *module_name = nullptr) {
+    vector<ModuleMemoryRegion> regions;
+    char filename[32], line[2048], permissions[8];
+    snprintf(filename, sizeof(filename), "/proc/%d/maps", target_pid);
+    FILE *fp = fopen(filename, "rt");
+    if (fp == nullptr) return regions;
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (module_name != nullptr && strstr(line, module_name) == nullptr) continue;
+        unsigned long start = 0, end = 0;
+        int pathStart = 0;
+        if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &start, &end, permissions, &pathStart) == 3 && end > start) {
+            string name = pathStart > 0 ? string(line + pathStart) : "[anonymous]";
+            while (!name.empty() && (name.back() == '\n' || name.back() == '\r')) name.pop_back();
+            regions.push_back({static_cast<kaddr>(start), static_cast<kaddr>(end),
+                               permissions[0] == 'r', permissions[2] == 'x', name});
+        }
+    }
+    fclose(fp);
+    return regions;
+}
+
+vector<ModuleMemoryRegion> get_module_regions(const char *module_name) {
+    return get_process_regions(module_name);
 }
 
 kaddr getRealOffset(kaddr offset) {

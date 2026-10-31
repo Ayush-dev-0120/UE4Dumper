@@ -12,6 +12,8 @@ const struct option long_options[] = {
         {"fast",       no_argument,       nullptr, 'f'},
         {"objs",       no_argument,       nullptr, 'n'},
         {"strings",    no_argument,       nullptr, 's'},
+        {"strings-lib", required_argument, nullptr, 'L'},
+        {"strings-lib-min", required_argument, nullptr, 'm'},
         {"sdku",       no_argument,       nullptr, 'a'},
         {"sdkw",       no_argument,       nullptr, 'b'},
         {"newue",      no_argument,       nullptr, 'c'},
@@ -48,6 +50,8 @@ void Usage() {
     printf("--Dump Strings Args----------------------------------------------------------------------\n");
     printf("  --strings                           Dump Strings\n");
     printf("  --gname <address>                   GNames Pointer Address\n");
+    printf("  --strings-lib <library.so>          Dump runtime memory and strings from a loaded library\n");
+    printf("  --strings-lib-min <length>          Minimum extracted string length (default: 4)\n");
     printf("--Dump Objects Args----------------------------------------------------------------------\n");
     printf("  --objs                              Dumping Object List\n");
     printf("  --gname <address>                   GNames Pointer Address\n");
@@ -91,6 +95,8 @@ int main(int argc, char *argv[]) {
             isSdkDump = false,
             isSdkDump2 = false,
             isActorDump = false;
+    string stringsLib;
+    size_t stringsMinLength = 4;
 
     while ((c = getopt_long(argc, argv, short_options, long_options, nullptr)) != -1) {
         switch (c) {
@@ -127,6 +133,19 @@ int main(int argc, char *argv[]) {
             case 's':
                 isStrDump = true;
                 break;
+            case 'L':
+                stringsLib = optarg;
+                break;
+            case 'm': {
+                char *end = nullptr;
+                unsigned long parsed = strtoul(optarg, &end, 10);
+                if (end == optarg || *end != '\0' || parsed == 0 || parsed > 4096) {
+                    isValidArg = false;
+                } else {
+                    stringsMinLength = static_cast<size_t>(parsed);
+                }
+                break;
+            }
             case 'a':
                 isSdkDump = true;
                 break;
@@ -176,7 +195,8 @@ int main(int argc, char *argv[]) {
     isPUBGNS = isPUBGNewState();
 
     if (!isValidArg ||
-        (!isLibDump && !isObjsDump && !isStrDump && !isSdkDump && !isSdkDump2 && !isActorDump)) {
+        (!isLibDump && !isObjsDump && !isStrDump && !isSdkDump && !isSdkDump2 &&
+         !isActorDump && stringsLib.empty())) {
         printf("Wrong Arguments, Please Check!!\n");
         Usage();
         return -1;
@@ -191,13 +211,151 @@ int main(int argc, char *argv[]) {
     cout << "Process name: " << pkg.c_str() << ", Pid: " << target_pid << endl;
 
     //Lib Base Address
-    libbase = get_module_base(lib_name);
+    const char *targetModule = stringsLib.empty() ? lib_name : stringsLib.c_str();
+    libbase = get_module_base(targetModule);
     if (libbase == 0) {
-        cout << "Can't find Library: " << lib_name << endl;
+        cout << "Can't find Library: " << targetModule << endl;
         return -1;
     }
-    cout << "Base Address of " << lib_name << " Found At " << setbase(16) << libbase << setbase(10)
+    cout << "Base Address of " << targetModule << " Found At " << setbase(16) << libbase << setbase(10)
          << endl;
+
+    if (!stringsLib.empty()) {
+        vector<ModuleMemoryRegion> regions = get_module_regions(targetModule);
+        if (regions.empty()) {
+            cout << "No memory mappings found for Library: " << targetModule << endl;
+            return -1;
+        }
+        size_t slash = stringsLib.find_last_of('/');
+        string outputName = stringsLib.substr(slash == string::npos ? 0 : slash + 1);
+        kaddr imageBase = regions.front().start;
+        kaddr imageEnd = regions.front().end;
+        for (const auto &region : regions) {
+            imageBase = min(imageBase, region.start);
+            imageEnd = max(imageEnd, region.end);
+        }
+        ofstream stringsOut(outputpath + "/Strings_" + outputName + ".txt");
+        ofstream xrefsOut(outputpath + "/Xrefs_" + outputName + ".txt");
+        ofstream memoryOut(outputpath + "/Runtime_" + outputName + ".bin", ofstream::out | ofstream::binary);
+        if (!stringsOut.is_open() || !xrefsOut.is_open() || !memoryOut.is_open()) {
+            cout << "Can't create runtime dump output files" << endl;
+            return -1;
+        }
+        const size_t chunkSize = 4096;
+        vector<unsigned char> buffer(chunkSize);
+        vector<unsigned char> zeros(chunkSize, 0);
+        string current;
+        string wideCurrent;
+        kaddr currentStart = 0;
+        kaddr wideStart = 0;
+        vector<pair<kaddr, string>> stringLocations;
+        uint64 count = 0;
+        auto flushString = [&]() {
+            if (current.size() >= stringsMinLength) {
+                stringsOut << "[+0x" << hex << (currentStart - imageBase) << "] [0x"
+                           << currentStart << "] " << current << dec << '\n';
+                stringLocations.push_back(make_pair(currentStart, current));
+                ++count;
+            }
+            current.clear();
+        };
+        auto flushWideString = [&]() {
+            if (wideCurrent.size() >= stringsMinLength) {
+                stringsOut << "[+0x" << hex << (wideStart - imageBase) << "] [0x"
+                           << wideStart << "] [UTF-16] " << wideCurrent << dec << '\n';
+                stringLocations.push_back(make_pair(wideStart, wideCurrent));
+                ++count;
+            }
+            wideCurrent.clear();
+        };
+        cout << "Dumping runtime memory and extracting strings from " << targetModule << endl;
+        for (const auto &region : regions) {
+            if (!region.readable) continue;
+            flushString();
+            for (kaddr address = region.start; address < region.end;) {
+                size_t amount = static_cast<size_t>(min<kaddr>(chunkSize, region.end - address));
+                memoryOut.seekp(static_cast<streamoff>(address - imageBase));
+                if (!vm_readv(reinterpret_cast<void *>(address), buffer.data(), amount)) {
+                    memoryOut.write(reinterpret_cast<const char *>(zeros.data()), amount);
+                    flushString();
+                    flushWideString();
+                    address += amount;
+                    continue;
+                }
+                memoryOut.write(reinterpret_cast<const char *>(buffer.data()), amount);
+                for (size_t i = 0; i < amount; ++i) {
+                    unsigned char ch = buffer[i];
+                    if (ch >= 0x20 && ch <= 0x7e) {
+                        if (current.empty()) currentStart = address + i;
+                        current.push_back(static_cast<char>(ch));
+                    } else flushString();
+                }
+                for (size_t i = 0; i + 1 < amount; ++i) {
+                    unsigned char ch = buffer[i];
+                    if (ch >= 0x20 && ch <= 0x7e && buffer[i + 1] == 0) {
+                        if (wideCurrent.empty()) wideStart = address + i;
+                        wideCurrent.push_back(static_cast<char>(ch));
+                        ++i;
+                    } else {
+                        flushWideString();
+                    }
+                }
+                address += amount;
+            }
+            flushString();
+            flushWideString();
+        }
+        stringsOut.close();
+        // Find exact 64-bit pointers to extracted strings across readable process mappings.
+        unordered_map<kaddr, size_t> stringByAddress;
+        for (size_t i = 0; i < stringLocations.size(); ++i)
+            stringByAddress[stringLocations[i].first] = i;
+        vector<uint64> xrefCounts(stringLocations.size(), 0);
+        vector<ModuleMemoryRegion> processRegions = get_process_regions();
+        xrefsOut << "# Exact 64-bit pointer references to string start addresses.\n"
+                 << "# A reference inside executable memory may be a data literal; this does not identify a function by itself.\n";
+        const size_t scanSize = 64 * 1024;
+        vector<unsigned char> scanBuffer(scanSize + sizeof(kaddr));
+        for (const auto &region : processRegions) {
+            if (!region.readable || region.name.find(".so") == string::npos) continue;
+            for (kaddr address = region.start; address + sizeof(kaddr) <= region.end;) {
+                size_t amount = static_cast<size_t>(min<kaddr>(scanSize, region.end - address));
+                if (!vm_readv(reinterpret_cast<void *>(address), scanBuffer.data(), amount)) {
+                    address += amount;
+                    continue;
+                }
+                for (size_t i = 0; i + sizeof(kaddr) <= amount; i += sizeof(kaddr)) {
+                    kaddr value = 0;
+                    memcpy(&value, scanBuffer.data() + i, sizeof(value));
+                    auto found = stringByAddress.find(value);
+                    if (found == stringByAddress.end()) continue;
+                    size_t stringIndex = found->second;
+                    kaddr refAddress = address + i;
+                    xrefsOut << "[string +0x" << hex << (stringLocations[stringIndex].first - imageBase)
+                             << "] [ref 0x" << refAddress << "] [" << (region.executable ? "executable" : "data") << "] ["
+                             << region.name << "] " << stringLocations[stringIndex].second << dec << '\n';
+                    ++xrefCounts[stringIndex];
+                }
+                address += amount;
+            }
+        }
+        xrefsOut << "\n# Strings without an exact pointer match are not listed in the reference section.\n";
+        for (size_t i = 0; i < stringLocations.size(); ++i) {
+            if (xrefCounts[i] == 0)
+                xrefsOut << "[string +0x" << hex << (stringLocations[i].first - imageBase)
+                         << "] [no exact pointer found] " << stringLocations[i].second << dec << '\n';
+        }
+        xrefsOut.close();
+        memoryOut.close();
+        cout << count << " strings written to " << outputpath << "/Strings_"
+             << outputName << ".txt" << endl;
+        cout << "Runtime memory image written to " << outputpath << "/Runtime_" << outputName
+             << ".bin (span: " << (imageEnd - imageBase) << " bytes; base: 0x"
+             << hex << imageBase << dec << ")" << endl;
+        cout << "Pointer reference report written to " << outputpath << "/Xrefs_"
+             << outputName << ".txt" << endl;
+        return 0;
+    }
 
     if (isLibDump) {
         //Lib End Address
